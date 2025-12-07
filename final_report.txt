@@ -1,0 +1,53 @@
+Final Project Report
+SHUBHAM JANGRA
+COMP 4980: Machine Learning
+December 2, 2025
+
+Title: Fraud Detection on Simulated Card Transactions
+
+Data Description
+For this project I used a simulated payment‑card transaction dataset designed for fraud detection research. It simulates customers and merchant terminals over time, assigns customers to nearby terminals in a 100×100 grid, and injects fraud through three scenarios so I can test whether a model finds both obvious and subtle patterns. I worked with ~1.75 million transactions across 183 days (2018‑04‑01 to 2018‑09‑30), covering 5,000 customers and 10,000 terminals. Each transaction includes a unique ID, timestamp, customer ID, terminal ID, amount, time indices (seconds and days since start), a binary fraud label (TX_FRAUD), and a scenario flag (TX_FRAUD_SCENARIO: 0=legit, 1=high‑amount, 2=compromised terminal, 3=compromised customer). I stored and processed daily data as `.pkl` files for speed; the original data and simulator are documented here: https://fraud-detection-handbook.github.io/fraud-detection-handbook/.
+
+Fraud is rare in this dataset (~0.8%), which is why I chose this much data. With 1.75M rows, I get thousands of fraud examples spread across customers, locations, and time windows. That allows meaningful training and evaluation without overfitting and still supports clean, time‑based splits by date. A much smaller dataset would have too few fraud cases and would tempt the model to predict “always legitimate,” which looks good on accuracy but fails the actual task of catching fraud.
+
+Data Analysis
+I loaded transactions for April through September 2018 and started with simple checks to understand the landscape. There were no missing values, the class imbalance was strong (about 0.8% fraud), and transaction amounts were right‑skewed, with most under $100 and a long tail up to ~$1000+. I created descriptive plots to orient myself: histograms for amounts and behavioural features, a correlation heatmap for numeric variables, and boxplots split by weekend and night. I confirmed that terminal risk spikes when a terminal is compromised and that customer activity varies widely—some customers transact daily, others rarely. These quick looks told me a single threshold on amount would miss a lot; I would need behaviour and time‑aware features, not just amount.
+
+On the numeric side, I summarized distributions and checked for outliers. The customer rolling averages (1/7/30 days) were correlated, which is expected since recent behaviour echoes past behaviour. Terminal risk features were highly skewed, mostly near zero, with sharp spikes to 1.0 during compromise windows. Night transactions showed slightly higher variance and more outliers than daytime, and weekends looked similar but with a bit more spread. Overall, the analysis supported a modelling approach that leverages rolling windows and risk indicators rather than relying on raw amounts.
+
+Data Exploration
+For PCA, I standardized 15 numeric features: amount, weekend/night flags, rolling customer counts and averages over 1/7/30 days, and rolling terminal activity and risk over 1/7/30 days. About 96% of the variance required 12 components, which tells me most features carry useful signal and there is moderate redundancy (12 components vs 15 features). PC1 was driven by customer behaviour (average amount and recent counts) plus amount itself. PC2 was dominated by terminal risk and activity. That aligns with the simulator’s design and gave me confidence to keep both behaviour families in the model rather than collapsing the feature space too aggressively. The PCA explained‑variance curve was smooth, meaning information is spread across components rather than concentrated in just a few.
+
+For decision trees, I trained a compact depth‑2 classifier to get a readable snapshot of what separates fraud from non‑fraud. The tree split first on the 30‑day terminal risk and then on amount, which cleanly picked up the “compromised terminal” scenario and the obvious “very high amount” scenario. As a sanity check it worked well, but the tree is too shallow to capture cross‑feature interactions (for example, the combination of rising customer average amount with concurrent terminal risk). That pushed me toward ensembles that can discover these interactions.
+
+Feature Engineering
+I focused on behaviour and simple temporal context. For customers, I used rolling counts and average amounts over 1, 7, and 30‑day windows to capture both short‑term spikes and longer trends. For terminals, I used rolling counts and provided risk indicators over the same windows to surface sustained compromise periods. I also kept binary flags for weekend and night, which add weak but non‑zero signal about when fraud tends to occur. I deliberately excluded raw IDs from the model to avoid memorization and to keep the approach generalizable; instead, aggregates summarize behaviour regardless of the specific customer or terminal.
+
+Validation Strategy and Metrics
+Given the severe imbalance, I used 3‑fold cross‑validation and prioritized AUROC and Average Precision rather than accuracy. AUROC measures ranking quality across thresholds (0.5=random, 1.0=perfect) and is robust to imbalance. Average Precision emphasizes the precision‑recall trade‑off, which is the real pain point in fraud detection: you want to catch fraud (recall) while limiting false alarms (precision). I reported mean±std across folds for each model/configuration to check stability.
+
+Imbalance Handling and Sampling
+I compared three setups to see how training distribution affects performance: (1) a 50k random sample as a quick baseline that preserves original class ratios; (2) random undersampling to about a 1.5:1 legitimate‑to‑fraud ratio while keeping all fraud cases, which reduces training size but sharpens the focus on minority class; and (3) oversampling fraud to a 50/50 split, which tests precision/recall behaviour but risks overfitting duplicated examples. In practice, undersampling delivered the best Average Precision and strongest AUROC while training fast, and oversampling improved recall but inflated false positives.
+
+Models and Tuning
+I trained Random Forest, AdaBoost, Gradient Boosting, XGBoost, and a small MLP. XGBoost was consistently the top performer, so I did a grid search over max_depth (3, 5), n_estimators (50, 100, 200), learning_rate (0.1, 0.3), and scale_pos_weight (5, 10). The best configuration was compact—max_depth=3, n_estimators=50, learning_rate=0.1, scale_pos_weight=5—which balanced bias and variance and avoided overfitting on the undersampled data.
+
+Results and Analysis
+With the tuned XGBoost trained on the undersampled data and evaluated on a separate random test slice, I observed Train AUROC around 0.984 versus Test AUROC around 0.962, which indicates good generalization without obvious overfitting. Average Precision improved under undersampling compared to random sampling and oversampling, reflecting better focus on the minority class. A confusion‑matrix check at a threshold tuned for higher recall showed the expected trade‑off: most fraud is caught while accepting a controlled increase in false positives. This is a sensible operating point for fraud operations when the review queue and customer friction are actively managed.
+
+Looking at what the model learned, feature importance and small trees extracted from the ensemble were consistent with the PCA story and the simulator design. Terminal risk over longer windows is the strongest signal for the “compromised terminal” scenario. Amount helps detect the “very high amount” scenario. Customer rolling behaviour flags the “compromised customer” scenario through sudden shifts in average amount and recent counts. Weekend and night contributed a little but were not dominant compared to behaviour and terminal risk. In practice, these signals combine: spikes in customer averages during a terminal‑risk window are particularly suspicious.
+
+Thresholds, Costs, and Deployment
+Fraud detection lives on threshold decisions. With a probability score from XGBoost, a higher threshold reduces false positives but misses more fraud; a lower threshold does the opposite. A reasonable policy is triage: block transactions above a high threshold (e.g., 0.8), queue medium‑risk transactions (0.5–0.8) for review, and auto‑approve low‑risk ones. The business cost depends on loss avoidance versus customer friction, so the threshold should be tuned on a validation set that reflects real class ratios. For deployment, a feature pipeline must compute rolling windows per customer and terminal in near‑real time; the model then scores each transaction and logs decisions for audit. Explainability for customer support can come from SHAP values to show which features drove a high‑risk score.
+
+Limitations and Future Work
+The simulator is clean and labels are perfect, so real‑world noise (missing data, mislabeled events, adversarial behaviour) is absent. Concept drift exists but is limited to the predefined scenarios. A production system should (1) retrain regularly to adapt to changing fraud patterns; (2) add cost‑sensitive learning or custom decision thresholds per segment (e.g., high‑value customers, high‑risk terminals); (3) incorporate sequence models (e.g., time‑aware gradient boosting, simple RNNs) to capture temporal dependencies beyond rolling averages; and (4) add unsupervised anomaly detection to catch truly novel patterns.
+
+Why This Dataset Worked Well
+It is big enough to feel realistic, labeled so I can learn and measure, and structured to expose the classic problems in fraud: imbalance, time dependence, and behaviour. I could start quickly, build proper features, and still ask interesting questions about thresholds and cost. It let me focus on modeling rather than heavy data cleaning, and it rewarded careful validation and sampling choices. Most importantly, it allowed me to connect model outputs to operational decisions—how many reviews to expect, how precise we are at a given recall, and what thresholds make sense for the business.
+
+References
+Le Borgne, Y.‑A., & Bontempi, G. Reproducible Machine Learning for Credit Card Fraud Detection – Practical Handbook. https://fraud-detection-handbook.github.io/fraud-detection-handbook/
+Pedregosa, F. et al. (2011). Scikit‑learn: Machine Learning in Python. JMLR 12, 2825–2830.
+Chen, T., & Guestrin, C. (2016). XGBoost: A Scalable Tree Boosting System. KDD.
+Chawla, N. V. et al. (2002). SMOTE: Synthetic Minority Over‑sampling Technique. JAIR 16, 321–357.
